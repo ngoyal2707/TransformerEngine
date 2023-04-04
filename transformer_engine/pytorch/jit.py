@@ -36,6 +36,29 @@ def bias_gelu_fused_(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     return x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))
 
 
+@torch.jit.script
+def gelu_fused_(inp: torch.Tensor) -> torch.Tensor:
+    """GeLU fused"""
+    return inp * 0.5 * (1.0 + torch.tanh(0.79788456 * inp * (1 + 0.044715 * inp * inp)))
+
+
+# gradient of tanh approximation of gelu
+@torch.jit.script
+def dgelu_fused_(
+    grad_output: torch.Tensor, inp: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Dgelu fused"""
+    x = inp
+    tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
+    # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
+    ff = 0.5 * x * (
+        (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)
+    ) + 0.5 * (1 + tanh_out)
+    dgelu = ff * grad_output
+    bgrad = dgelu.sum(dim=0)
+    return bgrad, dgelu
+
+
 # gradient of tanh approximation of gelu
 # gradient of actual gelu is:
 # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
@@ -58,6 +81,8 @@ def bgrad_dgelu_fused_(
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Disable native AMP for bias_gelu_fused_"""
     with torch.cuda.amp.autocast(enabled=False):
+        if bias.numel() != 0:
+            return gelu_fused_(inp)
         return bias_gelu_fused_(inp, bias)
 
 
@@ -66,7 +91,9 @@ def bgrad_dgelu_fused(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Disable native AMP for `bgrad_dgelu_fused_`"""
     with torch.cuda.amp.autocast(enabled=False):
-        return bgrad_dgelu_fused_(grad_output, inp, bias)
+        if bias.numel() != 0:
+            return bgrad_dgelu_fused_(grad_output, inp, bias)
+        return dgelu_fused_(grad_output, inp)
 
 
 def bias_dropout_add(
